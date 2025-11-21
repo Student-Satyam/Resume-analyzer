@@ -15,7 +15,7 @@ def get_generator():
 generator = get_generator()
 
 def extract_text_from_pdf(file_object):
-    reader = PdfReader(path)
+    reader = PdfReader(file_object)
     text = ""
     for p in reader.pages:
         text += p.extract_text() or "\n"
