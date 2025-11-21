@@ -3,6 +3,7 @@ import os
 from PyPDF2 import PdfReader
 from transformers import pipeline
 import io
+import json # Import json for parsing output
 
 # Initialize the Hugging Face pipeline for text generation
 # This should ideally be cached with st.cache_resource for Streamlit apps
@@ -21,11 +22,43 @@ def extract_text_from_pdf(file_object):
     return text
 
 def analyze_resume(text):
-    prompt = f"Read the following resume text and give:\n1) A short summary (2-3 lines)\n2) Top 5 strengths\n3) Top 5 improvements\n4) List job roles that match the resume\nResume:\n{text}"
-    # For Hugging Face, we typically pass the prompt directly to the generator
-    # The output will be a list of dictionaries, take the 'generated_text' from the first one
-    resp = generator(prompt, max_length=1024, num_return_sequences=1) # Increased max_length
-    return resp[0]['generated_text']
+    # 1. Truncate input text to fit model's max input length (typically 512 for FLAN-T5-base)
+    # The tokenizer is part of the pipeline's underlying model/tokenizer.
+    # We use 450 tokens to leave some buffer for the prompt structure itself.
+    max_input_tokens = 450 
+    encoded_input = generator.tokenizer.encode(text, max_length=max_input_tokens, truncation=True)
+    truncated_text = generator.tokenizer.decode(encoded_input, skip_special_tokens=True)
+
+    # 2. Modify prompt to ask for structured JSON output
+    prompt = f"""
+    Analyze the following resume text and provide the information in a JSON format.
+    The JSON object should have the following keys:
+    - 'summary': A short summary (2-3 lines) of the resume.
+    - 'strengths': A list of top 5 strengths from the resume.
+    - 'improvements': A list of top 5 areas for improvement from the resume.
+    - 'job_roles': A list of job roles that match the resume.
+
+    Resume:\n{truncated_text}
+    """
+    
+    # 3. Use max_new_tokens instead of max_length
+    # Increased max_new_tokens to allow for more detailed structured output, like JSON.
+    resp = generator(prompt, max_new_tokens=768, num_return_sequences=1) # Using max_new_tokens
+    
+    raw_output = resp[0]['generated_text']
+
+    # 4. Parse the output as JSON
+    try:
+        analysis_result = json.loads(raw_output)
+    except json.JSONDecodeError:
+        # Fallback if JSON parsing fails - return raw text or a structured error
+        st.warning("Failed to parse AI analysis as JSON. Displaying raw output.")
+        analysis_result = {
+            "error": "Failed to parse AI output as JSON. Raw output:",
+            "raw_text": raw_output
+        }
+    
+    return analysis_result
 
 st.set_page_config(layout="wide")
 st.title("Resume Analyzer with Hugging Face")
@@ -47,7 +80,26 @@ if uploaded_file is not None:
             with st.spinner("Analyzing resume... This might take a moment."):
                 analysis_result = analyze_resume(resume_text)
             st.subheader("Analysis Results:")
-            st.info(analysis_result)
+            # Display structured results
+            if isinstance(analysis_result, dict):
+                if "error" in analysis_result:
+                    st.error(analysis_result["error"])
+                    st.code(analysis_result["raw_text"])
+                else:
+                    st.write("**Summary:**")
+                    st.info(analysis_result.get("summary", "N/A"))
+                    st.write("**Top 5 Strengths:**")
+                    for strength in analysis_result.get("strengths", []):
+                        st.success(f"- {strength}")
+                    st.write("**Top 5 Improvements:**")
+                    for improvement in analysis_result.get("improvements", []):
+                        st.warning(f"- {improvement}")
+                    st.write("**Matching Job Roles:**")
+                    for role in analysis_result.get("job_roles", []):
+                        st.info(f"- {role}")
+            else:
+                # This case should ideally not be hit with the JSON parsing logic
+                st.info(analysis_result)
         else:
             st.warning("Could not extract text from the PDF. Please try another file.")
 else:
