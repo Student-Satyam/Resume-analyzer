@@ -1,43 +1,50 @@
 import streamlit as st
 import os
 from PyPDF2 import PdfReader
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer
 import io
-import json # Import json for parsing output
-import re   # Import regex for extracting JSON block
+import json
+import re
+import base64
 
-# Initialize the Hugging Face pipeline for text generation
-# This should ideally be cached with st.cache_resource for Streamlit apps
-@st.cache_resource
-def get_generator():
-    return pipeline("text2text-generation", model="google/flan-t5-base")
+# --- Configuration --- #
+MODEL_NAME = "google/flan-t5-large" # Upgraded model
+MAX_INPUT_TOKENS = 450 # Adjusted for typical T5 context window (512 - prompt length)
 
-generator = get_generator()
+# --- Streamlit Setup --- #
+st.set_page_config(layout="wide", page_title="Advanced Resume Analyzer")
 
+# --- Caching for efficiency --- #
+@st.cache_resource(show_spinner="Loading AI model...")
+def get_generator_and_tokenizer():
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    generator = pipeline("text2text-generation", model=MODEL_NAME, tokenizer=tokenizer)
+    return generator, tokenizer
+
+generator, tokenizer = get_generator_and_tokenizer()
+
+# --- Helper Functions --- #
 def extract_text_from_pdf(file_object):
     reader = PdfReader(file_object)
     text = ""
     for p in reader.pages:
-        text += p.extract_text() or "\n"
-    return text
+        page_text = p.extract_text()
+        if page_text:
+            text += page_text + "\n"
+    return text.strip()
 
 def analyze_resume(text):
-    # 1. Truncate input text to fit model's max input length (typically 512 for FLAN-T5-base)
-    # The tokenizer is part of the pipeline's underlying model/tokenizer.
-    # We use 450 tokens to leave some buffer for the prompt structure itself.
-    max_input_tokens = 450
-    encoded_input = generator.tokenizer.encode(text, max_length=max_input_tokens, truncation=True)
-    truncated_text = generator.tokenizer.decode(encoded_input, skip_special_tokens=True)
+    # Truncate input text to fit model's max input length
+    encoded_input = tokenizer.encode(text, max_length=MAX_INPUT_TOKENS, truncation=True)
+    truncated_text = tokenizer.decode(encoded_input, skip_special_tokens=True)
 
-    # 2. Modify prompt to ask for structured JSON output and be very strict about it
-    # Instruct the model to wrap its JSON in a markdown code block.
     prompt = f"""
     You are an AI assistant specialized in resume analysis. Your task is to analyze the provided resume text
     and output a single JSON object. The JSON object must contain the following keys:
-    'summary': A concise summary (2-3 sentences) of the resume.
-    'strengths': A list of top 5 key strengths identified in the resume.
-    'improvements': A list of top 5 constructive suggestions or areas for improvement for the resume.
-    'job_roles': A list of suitable job titles or roles that match the resume's qualifications.
+    'summary': A concise summary (2-3 sentences) of the resume. Describe the candidate's core skills and experience.
+    'strengths': A list of top 5 key strengths identified in the resume. Focus on quantifiable achievements and relevant skills.
+    'improvements': A list of top 5 constructive suggestions or areas for improvement for the resume. Focus on clarity, completeness, and impact.
+    'job_roles': A list of 3-5 suitable job titles or roles that match the resume's qualifications, ordered by relevance.
 
     Resume Text to Analyze:
     ```
@@ -50,102 +57,120 @@ def analyze_resume(text):
         "summary": "...",
         "strengths": [...],
         "improvements": [...],
-        "job_roles": [...] 
+        "job_roles": [...]
     }}
     ```
     Do not include any narrative, explanation, or additional text before or after the JSON code block.
     Begin your response directly with the opening ```json.
     """
 
-    # 3. Use max_new_tokens instead of max_length
-    resp = generator(prompt, max_new_tokens=768, num_return_sequences=1)
+    # Use max_new_tokens for generation length
+    resp = generator(prompt, max_new_tokens=1024, num_return_sequences=1, do_sample=True, temperature=0.7, top_p=0.9)
 
     raw_output = resp[0]['generated_text'].strip()
 
-    # 4. Extract the JSON block using regex and parse it
-    parsed_json_text = ""
+    # Robust JSON extraction and parsing
     analysis_result = {}
 
-    # Attempt to extract JSON from markdown code block (preferred)
+    # 1. Attempt to extract JSON from markdown code block (preferred)
     json_match = re.search(r'```json\s*([\s\S]*?)\s*```', raw_output)
     if json_match:
         parsed_json_text = json_match.group(1).strip()
     else:
-        # Fallback if no markdown block found: try to clean and fix common model output issues
-        # Remove leading 'json ' if present, case-insensitive
+        # 2. Fallback: try to clean and fix common model output issues if no markdown block
         cleaned_output = re.sub(r'^(json|JSON)\s*', '', raw_output, flags=re.IGNORECASE).strip()
-
-        # If the output starts with a quote or a key (indicating a missing outer brace)
-        # AND it doesn't already start/end with curly braces, try to wrap it.
-        # This handles cases like: "summary": "...", "strengths": [...]
+        # If the output starts with a quote or a key (indicating a missing outer brace) and not already wrapped
         if cleaned_output and not (cleaned_output.startswith('{') and cleaned_output.endswith('}')):
-             # Check for common patterns that should be inside an object
              if re.match(r'"\w+":', cleaned_output) or re.match(r'\w+:', cleaned_output):
                  parsed_json_text = '{' + cleaned_output + '}'
              else:
                  parsed_json_text = cleaned_output # Use as is if it doesn't look like an object content
         else:
-            parsed_json_text = cleaned_output # Use the cleaned output as is
-
+            parsed_json_text = cleaned_output
 
     try:
         analysis_result = json.loads(parsed_json_text)
     except json.JSONDecodeError as e:
-        # Fallback if JSON parsing fails - return raw text or a structured error
-        st.warning(f"Failed to parse AI analysis as JSON. Error: {e}. Raw output below:")
-        analysis_result = {
-            "error": "Failed to parse AI output as JSON.",
-            "raw_text": raw_output, # Keep original raw output for debugging
-            "json_error": str(e),
-            "attempted_json_parse_text": parsed_json_text # Show what was actually attempted to parse
-        }
+        st.error(f"AI output was not valid JSON. Error: {e}")
+        st.code(f"Raw AI Output:\n{raw_output}\n\nAttempted to parse:\n{parsed_json_text}")
+        analysis_result = {"error": "Failed to parse AI output as JSON. See logs for details.", "raw_output": raw_output}
 
     return analysis_result
 
-st.set_page_config(layout="wide")
-st.title("Resume Analyzer with Hugging Face")
-st.write("Upload a PDF resume and get an AI-powered analysis!")
+def get_download_link(data, filename, text):
+    b64 = base64.b64encode(data.encode()).decode()
+    href = f'<a href="data:file/json;base64,{b64}" download="{filename}">{text}</a>'
+    return href
 
-uploaded_file = st.file_uploader("Choose a PDF file", type=["pdf"])
+# --- Streamlit UI --- #
+st.title("🧠 Advanced Resume Analyzer")
+st.markdown("Upload a PDF resume and get an AI-powered analysis with strengths, improvements, and job role suggestions.")
+
+with st.sidebar:
+    st.header("Upload Your Resume")
+    uploaded_file = st.file_uploader("Choose a PDF file", type=["pdf"], help="Please upload a clear, text-based PDF resume.")
+    process_button = st.button("Analyze Resume", type="primary", use_container_width=True)
+
 
 if uploaded_file is not None:
-    # To read file as bytes, then use io.BytesIO to make it file-like
+    # Read file as bytes and use io.BytesIO to make it file-like for PyPDF2
     bytes_data = uploaded_file.getvalue()
     file_object = io.BytesIO(bytes_data)
 
-    st.subheader("Extracted Resume Text:")
-    resume_text = extract_text_from_pdf(file_object)
-    st.text_area("Resume Text", resume_text, height=300, label_visibility="hidden")
-
-    if st.button("Analyze Resume"):
+    st.subheader("1. Extracted Resume Text")
+    with st.expander("View Raw Text", expanded=False):
+        resume_text = extract_text_from_pdf(file_object)
         if resume_text:
-            with st.spinner("Analyzing resume... This might take a moment."):
-                analysis_result = analyze_resume(resume_text)
-            st.subheader("Analysis Results:")
-            # Display structured results
-            if isinstance(analysis_result, dict):
-                if "error" in analysis_result:
-                    st.error(analysis_result["error"])
-                    st.code(analysis_result["raw_text"])
-                    if "json_error" in analysis_result:
-                        st.error(f"JSON Parsing Error Details: {analysis_result['json_error']}")
-                    if "attempted_json_parse_text" in analysis_result:
-                        st.code(f"Attempted to parse:\n{analysis_result['attempted_json_parse_text']}")
-                else:
-                    st.write("**Summary:**")
-                    st.info(analysis_result.get("summary", "N/A"))
-                    st.write("**Top 5 Strengths:**")
-                    for strength in analysis_result.get("strengths", []):
-                        st.success(f"- {strength}")
-                    st.write("**Top 5 Improvements:**")
-                    for improvement in analysis_result.get("improvements", []):
-                        st.warning(f"- {improvement}")
-                    st.write("**Matching Job Roles:**")
-                    for role in analysis_result.get("job_roles", []):
-                        st.info(f"- {role}")
-            else:
-                st.info(analysis_result)
+            st.text_area("", resume_text, height=300, disabled=True, label_visibility="collapsed")
         else:
-            st.warning("Could not extract text from the PDF. Please try another file.")
+            st.warning("Could not extract text from the PDF. It might be an image-based PDF. Please try another file.")
+
+    if process_button and resume_text:
+        st.subheader("2. AI Analysis Results")
+        with st.spinner("Analyzing resume... This might take a moment (approx. 30-60 seconds)."):
+            analysis_result = analyze_resume(resume_text)
+
+        if "error" in analysis_result:
+            st.error("An error occurred during analysis. Please check the console or try again.")
+        else:
+            # Display structured results
+            with st.expander("Summary", expanded=True):
+                st.info(analysis_result.get("summary", "No summary provided."))
+
+            with st.expander("Top Strengths", expanded=True):
+                if analysis_result.get("strengths"):
+                    for i, strength in enumerate(analysis_result["strengths"]):
+                        st.markdown(f"- **{strength}**")
+                else:
+                    st.markdown("No strengths identified.")
+
+            with st.expander("Areas for Improvement", expanded=True):
+                if analysis_result.get("improvements"):
+                    for i, improvement in enumerate(analysis_result["improvements"]):
+                        st.warning(f"- {improvement}")
+                else:
+                    st.markdown("No improvements suggested.")
+
+            with st.expander("Matching Job Roles", expanded=True):
+                if analysis_result.get("job_roles"):
+                    for i, role in enumerate(analysis_result["job_roles"]):
+                        st.success(f"- {role}")
+                else:
+                    st.markdown("No job roles suggested.")
+
+            st.markdown("--- Jardar")
+            st.download_button(
+                label="Download Analysis as JSON",
+                data=json.dumps(analysis_result, indent=2),
+                file_name="resume_analysis.json",
+                mime="application/json",
+                help="Download the complete AI analysis in JSON format."
+            )
+
+    elif process_button and not resume_text:
+        st.warning("Please upload a PDF file and ensure text can be extracted before analyzing.")
+
+elif uploaded_file is None and process_button:
+    st.warning("Please upload a PDF file to begin the analysis.")
 else:
-    st.info("Please upload a PDF file to begin the analysis.")
+    st.info("Upload a PDF resume in the sidebar to get started!")
