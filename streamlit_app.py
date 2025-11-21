@@ -1,3 +1,4 @@
+%%writefile app.py
 import streamlit as st
 import os
 from PyPDF2 import PdfReader
@@ -50,7 +51,7 @@ def analyze_resume(text):
         "summary": "...",
         "strengths": [...],
         "improvements": [...],
-        "job_roles": [...]
+        "job_roles": [...] 
     }}
     ```
     Do not include any narrative, explanation, or additional text before or after the JSON code block.
