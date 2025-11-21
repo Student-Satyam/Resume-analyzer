@@ -29,35 +29,43 @@ def analyze_resume(text):
     encoded_input = generator.tokenizer.encode(text, max_length=max_input_tokens, truncation=True)
     truncated_text = generator.tokenizer.decode(encoded_input, skip_special_tokens=True)
 
-    # 2. Modify prompt to ask for structured JSON output
+    # 2. Modify prompt to ask for structured JSON output and be very strict about it
     prompt = f"""
-    Analyze the following resume text and provide the information in a JSON format.
-    The JSON object should have the following keys:
-    - 'summary': A short summary (2-3 lines) of the resume.
-    - 'strengths': A list of top 5 strengths from the resume.
-    - 'improvements': A list of top 5 areas for improvement from the resume.
-    - 'job_roles': A list of job roles that match the resume.
+    You are an AI assistant specialized in resume analysis.
+    Analyze the following resume text and provide your analysis STRICTLY in JSON format.
+    The JSON object must contain the following keys:
+    - 'summary': A concise summary (2-3 sentences) of the resume.
+    - 'strengths': A list of top 5 key strengths identified in the resume.
+    - 'improvements': A list of top 5 constructive suggestions or areas for improvement for the resume.
+    - 'job_roles': A list of suitable job titles or roles that match the resume's qualifications.
 
-    Resume:\n{truncated_text}
+    Resume Text to Analyze:
+    ```
+    {truncated_text}
+    ```
+
+    Your entire output must be a single, valid JSON object. Do not include any narrative,
+    explanation, or additional text before or after the JSON. Ensure the JSON is directly parsable.
     """
-    
+
     # 3. Use max_new_tokens instead of max_length
     # Increased max_new_tokens to allow for more detailed structured output, like JSON.
     resp = generator(prompt, max_new_tokens=768, num_return_sequences=1) # Using max_new_tokens
     
-    raw_output = resp[0]['generated_text']
+    raw_output = resp[0]['generated_text'].strip() # Strip leading/trailing whitespace
 
     # 4. Parse the output as JSON
     try:
         analysis_result = json.loads(raw_output)
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
         # Fallback if JSON parsing fails - return raw text or a structured error
-        st.warning("Failed to parse AI analysis as JSON. Displaying raw output.")
+        st.warning(f"Failed to parse AI analysis as JSON. Error: {e}. Raw output below:")
         analysis_result = {
-            "error": "Failed to parse AI output as JSON. Raw output:",
-            "raw_text": raw_output
+            "error": "Failed to parse AI output as JSON.",
+            "raw_text": raw_output,
+            "json_error": str(e) # Include the JSON error message for debugging
         }
-    
+
     return analysis_result
 
 st.set_page_config(layout="wide")
@@ -85,6 +93,8 @@ if uploaded_file is not None:
                 if "error" in analysis_result:
                     st.error(analysis_result["error"])
                     st.code(analysis_result["raw_text"])
+                    if "json_error" in analysis_result: # Display JSON parsing error details
+                        st.error(f"JSON Parsing Error Details: {analysis_result['json_error']}")
                 else:
                     st.write("**Summary:**")
                     st.info(analysis_result.get("summary", "N/A"))
