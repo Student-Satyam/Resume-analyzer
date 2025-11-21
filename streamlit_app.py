@@ -4,6 +4,7 @@ from PyPDF2 import PdfReader
 from transformers import pipeline
 import io
 import json # Import json for parsing output
+import re   # Import regex for extracting JSON block
 
 # Initialize the Hugging Face pipeline for text generation
 # This should ideally be cached with st.cache_resource for Streamlit apps
@@ -25,45 +26,62 @@ def analyze_resume(text):
     # 1. Truncate input text to fit model's max input length (typically 512 for FLAN-T5-base)
     # The tokenizer is part of the pipeline's underlying model/tokenizer.
     # We use 450 tokens to leave some buffer for the prompt structure itself.
-    max_input_tokens = 450 
+    max_input_tokens = 450
     encoded_input = generator.tokenizer.encode(text, max_length=max_input_tokens, truncation=True)
     truncated_text = generator.tokenizer.decode(encoded_input, skip_special_tokens=True)
 
     # 2. Modify prompt to ask for structured JSON output and be very strict about it
+    # Instruct the model to wrap its JSON in a markdown code block.
     prompt = f"""
-    You are an AI assistant specialized in resume analysis.
-    Analyze the following resume text and provide your analysis STRICTLY in JSON format.
-    The JSON object must contain the following keys:
-    - 'summary': A concise summary (2-3 sentences) of the resume.
-    - 'strengths': A list of top 5 key strengths identified in the resume.
-    - 'improvements': A list of top 5 constructive suggestions or areas for improvement for the resume.
-    - 'job_roles': A list of suitable job titles or roles that match the resume's qualifications.
+    You are an AI assistant specialized in resume analysis. Your task is to analyze the provided resume text
+    and output a single JSON object. The JSON object must contain the following keys:
+    'summary': A concise summary (2-3 sentences) of the resume.
+    'strengths': A list of top 5 key strengths identified in the resume.
+    'improvements': A list of top 5 constructive suggestions or areas for improvement for the resume.
+    'job_roles': A list of suitable job titles or roles that match the resume's qualifications.
 
     Resume Text to Analyze:
     ```
     {truncated_text}
     ```
 
-    Your entire output must be a single, valid JSON object. Do not include any narrative,
-    explanation, or additional text before or after the JSON. Ensure the JSON is directly parsable.
+    Your entire output must be a single, valid JSON object, enclosed within a markdown code block like this:
+    ```json
+    {{
+        "summary": "...",
+        "strengths": [...],
+        "improvements": [...],
+        "job_roles": [...]
+    }}
+    ```
+    Do not include any narrative, explanation, or additional text before or after the JSON code block.
+    Begin your response directly with the opening ```json.
     """
 
     # 3. Use max_new_tokens instead of max_length
-    # Increased max_new_tokens to allow for more detailed structured output, like JSON.
-    resp = generator(prompt, max_new_tokens=768, num_return_sequences=1) # Using max_new_tokens
-    
-    raw_output = resp[0]['generated_text'].strip() # Strip leading/trailing whitespace
+    resp = generator(prompt, max_new_tokens=768, num_return_sequences=1)
 
-    # 4. Parse the output as JSON
+    raw_output = resp[0]['generated_text'].strip()
+
+    # 4. Extract the JSON block using regex and parse it
+    json_match = re.search(r'```json\s*([\s\S]*?)\s*```', raw_output)
+    parsed_json_text = ""
+    if json_match:
+        parsed_json_text = json_match.group(1).strip()
+    else:
+        # Fallback: if no json block, try to parse the whole output (might contain junk)
+        parsed_json_text = raw_output
+
     try:
-        analysis_result = json.loads(raw_output)
+        analysis_result = json.loads(parsed_json_text)
     except json.JSONDecodeError as e:
         # Fallback if JSON parsing fails - return raw text or a structured error
         st.warning(f"Failed to parse AI analysis as JSON. Error: {e}. Raw output below:")
         analysis_result = {
             "error": "Failed to parse AI output as JSON.",
-            "raw_text": raw_output,
-            "json_error": str(e) # Include the JSON error message for debugging
+            "raw_text": raw_output, # Keep original raw output for debugging
+            "json_error": str(e),
+            "attempted_json_parse_text": parsed_json_text # Show what was actually attempted to parse
         }
 
     return analysis_result
@@ -93,8 +111,10 @@ if uploaded_file is not None:
                 if "error" in analysis_result:
                     st.error(analysis_result["error"])
                     st.code(analysis_result["raw_text"])
-                    if "json_error" in analysis_result: # Display JSON parsing error details
+                    if "json_error" in analysis_result:
                         st.error(f"JSON Parsing Error Details: {analysis_result['json_error']}")
+                    if "attempted_json_parse_text" in analysis_result:
+                        st.code(f"Attempted to parse:\n{analysis_result['attempted_json_parse_text']}")
                 else:
                     st.write("**Summary:**")
                     st.info(analysis_result.get("summary", "N/A"))
@@ -108,7 +128,6 @@ if uploaded_file is not None:
                     for role in analysis_result.get("job_roles", []):
                         st.info(f"- {role}")
             else:
-                # This case should ideally not be hit with the JSON parsing logic
                 st.info(analysis_result)
         else:
             st.warning("Could not extract text from the PDF. Please try another file.")
