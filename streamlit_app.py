@@ -24,7 +24,7 @@ def analyze_resume(text):
     prompt = f"Read the following resume text and give:\n1) A short summary (2-3 lines)\n2) Top 5 strengths\n3) Top 5 improvements\n4) List job roles that match the resume\nResume:\n{text}"
     # For Hugging Face, we typically pass the prompt directly to the generator
     # The output will be a list of dictionaries, take the 'generated_text' from the first one
-    resp = generator(prompt, max_length=500, num_return_sequences=1)
+    resp = generator(prompt, max_length=1024, num_return_sequences=1) # Increased max_length
     return resp[0]['generated_text']
 
 st.set_page_config(layout="wide")
@@ -40,7 +40,7 @@ if uploaded_file is not None:
 
     st.subheader("Extracted Resume Text:")
     resume_text = extract_text_from_pdf(file_object)
-    st.text_area("", resume_text, height=300)
+    st.text_area("Resume Text", resume_text, height=300, label_visibility="hidden")
 
     if st.button("Analyze Resume"):
         if resume_text:
