@@ -15,8 +15,7 @@ def get_generator():
 generator = get_generator()
 
 def extract_text_from_pdf(file_object):
-    # PdfReader expects a file-like object, so we pass it directly
-    reader = PdfReader(file_object)
+    reader = PdfReader(path)
     text = ""
     for p in reader.pages:
         text += p.extract_text() or "\n"
@@ -64,13 +63,30 @@ def analyze_resume(text):
     raw_output = resp[0]['generated_text'].strip()
 
     # 4. Extract the JSON block using regex and parse it
-    json_match = re.search(r'```json\s*([\s\S]*?)\s*```', raw_output)
     parsed_json_text = ""
+    analysis_result = {}
+
+    # Attempt to extract JSON from markdown code block (preferred)
+    json_match = re.search(r'```json\s*([\s\S]*?)\s*```', raw_output)
     if json_match:
         parsed_json_text = json_match.group(1).strip()
     else:
-        # Fallback: if no json block, try to parse the whole output (might contain junk)
-        parsed_json_text = raw_output
+        # Fallback if no markdown block found: try to clean and fix common model output issues
+        # Remove leading 'json ' if present, case-insensitive
+        cleaned_output = re.sub(r'^(json|JSON)\s*', '', raw_output, flags=re.IGNORECASE).strip()
+
+        # If the output starts with a quote or a key (indicating a missing outer brace)
+        # AND it doesn't already start/end with curly braces, try to wrap it.
+        # This handles cases like: "summary": "...", "strengths": [...]
+        if cleaned_output and not (cleaned_output.startswith('{') and cleaned_output.endswith('}')):
+             # Check for common patterns that should be inside an object
+             if re.match(r'"\w+":', cleaned_output) or re.match(r'\w+:', cleaned_output):
+                 parsed_json_text = '{' + cleaned_output + '}'
+             else:
+                 parsed_json_text = cleaned_output # Use as is if it doesn't look like an object content
+        else:
+            parsed_json_text = cleaned_output # Use the cleaned output as is
+
 
     try:
         analysis_result = json.loads(parsed_json_text)
